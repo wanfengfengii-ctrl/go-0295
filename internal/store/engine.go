@@ -120,6 +120,13 @@ func (e *Engine) LockTask(id string, req LockTaskRequest) (LockResult, error) {
 		if !ok {
 			return notFound(id)
 		}
+		// Once locked, the rule snapshot and layout grid are immutable: a second
+		// lock — even with a different layout — must not overwrite them. Only a
+		// new rework generation may supersede the locked state.
+		if task.Status == domain.TaskLocked {
+			return &domain.Failure{Code: domain.CodeTerminalConflict,
+				Reasons: []domain.Reason{{Code: domain.CodeTerminalConflict, Detail: "task already locked"}}}
+		}
 		if task.Status == domain.TaskTerminal {
 			return &domain.Failure{Code: domain.CodeTerminalConflict,
 				Reasons: []domain.Reason{{Code: domain.CodeTerminalConflict, Detail: "task terminal"}}}
