@@ -14,6 +14,24 @@ type RecoverVerification struct {
 	Violations []string `json:"violations,omitempty"`
 }
 
+// storedLease is the recovery checker's view of a persisted lease: only the
+// fields needed to decide whether two leases for the same resource were ever
+// concurrently active.
+type storedLease struct {
+	Holder   string
+	Acquired domain.LogicalTime
+	Expires  domain.LogicalTime
+}
+
+// leaseWindowOverlap reports whether two leases' active windows [Acquired,
+// Expires) overlap in logical time. A lease is active only during its
+// half-open window (matching ledger.Lease.ActiveAt, which excludes t==Expires),
+// so an expired lease (e.g. taken at logical time 0 and long elapsed) never
+// collides with a fresh lease taken later on the same resource.
+func leaseWindowOverlap(a, b storedLease) bool {
+	return a.Acquired < b.Expires && b.Acquired < a.Expires
+}
+
 // Verify replays the persisted projection and checks the durable invariants:
 // integer-gram mass conservation, unique active leases and at most one terminal
 // decision per task. When a contradiction is found the store is placed into
@@ -31,21 +49,38 @@ func (e *Engine) Verify() (RecoverVerification, error) {
 			return nil
 		})
 		// 2. Unique active leases.
-		active := map[string]string{}
+		//
+		// The invariant is that no two leases for the same resource hold
+		// concurrently. A lease is "active" only during its time window
+		// [Acquired, Expires); an expired lease (e.g. taken at logical time 0
+		// and long since elapsed) must not collide with a fresh lease taken on
+		// the same resource much later. Therefore two leases conflict only when
+		// their active windows overlap, not merely because both carry a token.
+		byResource := map[string][]storedLease{}
 		_ = tx.ForEach(BucketLeases, func() any { return &ledger.Lease{} }, func(k string, val any) error {
 			l := val.(*ledger.Lease)
-			// A lease is only "active" conceptually during its window; a stored
-			// unexpired lease must not collide on the same resource.
-			resource := string(l.Kind) + "/" + l.Number
-			if l.Token != "" {
-				if prev, dup := active[resource]; dup {
-					v.Violations = append(v.Violations, fmt.Sprintf("duplicate active lease %s held by %s and %s", resource, prev, l.Holder))
-				} else {
-					active[resource] = l.Holder
-				}
+			if l.Token == "" {
+				return nil
 			}
+			resource := string(l.Kind) + "/" + l.Number
+			byResource[resource] = append(byResource[resource], storedLease{
+				Holder:   l.Holder,
+				Acquired: l.Acquired,
+				Expires:  l.Expires,
+			})
 			return nil
 		})
+		for resource, ls := range byResource {
+			for i := 0; i < len(ls); i++ {
+				for j := i + 1; j < len(ls); j++ {
+					if leaseWindowOverlap(ls[i], ls[j]) {
+						v.Violations = append(v.Violations, fmt.Sprintf(
+							"duplicate active lease %s held by %s and %s",
+							resource, ls[i].Holder, ls[j].Holder))
+					}
+				}
+			}
+		}
 		// 3. At most one terminal decision per task (enforced by key).
 		_ = tx.ForEach(BucketTerminal, func() any { return &arbiter.TerminalDecision{} }, func(k string, val any) error {
 			return nil
