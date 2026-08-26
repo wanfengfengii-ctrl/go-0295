@@ -131,13 +131,17 @@ type ReviewRequest struct {
 }
 
 // Review persists a review. A reviewer may only submit one review; a repeated
-// submission is a no-op that returns the stored opinion.
+// submission is a no-op that returns the stored opinion. The first recorded
+// opinion is immutable, so a later retry with a different opinion cannot
+// rewrite an approver into a rejecter (or vice versa).
 func (e *Engine) Review(id string, req ReviewRequest) (arbiter.Review, error) {
 	out := arbiter.Review{Reviewer: req.Reviewer, Qualified: req.Qualified, Opinion: req.Opinion}
 	err := e.db.Update(func(tx *Tx) error {
 		var existing arbiter.Review
 		if ok, _ := tx.GetJSON(BucketReviews, reviewKey(id, req.Reviewer), &existing); ok {
-			return tx.PutJSON(BucketReviews, reviewKey(id, req.Reviewer), out)
+			// First opinion wins: return the stored review unchanged.
+			out = existing
+			return nil
 		}
 		return tx.PutJSON(BucketReviews, reviewKey(id, req.Reviewer), out)
 	})
