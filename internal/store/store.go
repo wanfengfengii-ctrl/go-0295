@@ -12,8 +12,6 @@ import (
 	"os"
 
 	bolt "go.etcd.io/bbolt"
-
-	"rockwool-facade-render-handover/internal/domain"
 )
 
 // Bucket names for each persisted entity kind.
@@ -100,7 +98,10 @@ func (d *DB) Close() error {
 func (d *DB) setReadOnly() { d.readonly = true }
 
 // Update runs fn inside a read-write transaction and commits it. When the
-// store is in read-only isolation it refuses writes with ErrReadOnly.
+// store is in read-only isolation it refuses writes with ErrReadOnly. Any error
+// from fn — including every domain rejection such as a prefix violation — rolls
+// the transaction back, so a rejected command never leaves a partial material
+// withdrawal, lease, coverage change or evidence write behind.
 func (d *DB) Update(fn func(*Tx) error) error {
 	if d.readonly {
 		return ErrReadOnly
@@ -108,10 +109,6 @@ func (d *DB) Update(fn func(*Tx) error) error {
 	var callbackErr error
 	err := d.db.Update(func(tx *bolt.Tx) error {
 		callbackErr = fn(&Tx{tx: tx})
-		var failure *domain.Failure
-		if errors.As(callbackErr, &failure) && failure.Code == domain.CodePrefixViolation {
-			return nil
-		}
 		return callbackErr
 	})
 	if err != nil {
