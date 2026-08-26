@@ -15,10 +15,15 @@ type AcquireLeaseRequest struct {
 }
 
 // AcquireLease atomically acquires a lease for a resource, rejecting a busy
-// resource with a deterministic conflict.
+// resource with a deterministic conflict. The conflict check and the lease
+// write run inside a single read-write transaction: bbolt serializes writers,
+// so two concurrent acquires of the same resource cannot both win — the second
+// transaction observes the first's committed lease and rejects it. Splitting the
+// check (View) from the write (Update) would let both acquires pass an empty
+// conflict scan and each issue a valid token for the same device.
 func (e *Engine) AcquireLease(id string, req AcquireLeaseRequest) (ledger.Lease, error) {
 	var out ledger.Lease
-	err := e.db.View(func(tx *Tx) error {
+	err := e.db.Update(func(tx *Tx) error {
 		var task domain.FacadeTask
 		if ok, _ := tx.GetJSON(BucketTasks, id, &task); !ok {
 			return notFound(id)
@@ -40,14 +45,11 @@ func (e *Engine) AcquireLease(id string, req AcquireLeaseRequest) (ledger.Lease,
 		if err != nil {
 			return &domain.Failure{Code: domain.CodeInvalid, Reasons: []domain.Reason{{Code: domain.CodeInvalid, Detail: err.Error()}}}
 		}
+		if err := tx.PutJSON(BucketLeases, leaseKey(id, lease.Kind, lease.Number), lease); err != nil {
+			return err
+		}
 		out = lease
 		return nil
-	})
-	if err != nil {
-		return out, err
-	}
-	err = e.db.Update(func(tx *Tx) error {
-		return tx.PutJSON(BucketLeases, leaseKey(id, out.Kind, out.Number), out)
 	})
 	return out, err
 }
