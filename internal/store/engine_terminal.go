@@ -1,6 +1,8 @@
 package store
 
 import (
+	"strings"
+
 	"rockwool-facade-render-handover/internal/arbiter"
 	"rockwool-facade-render-handover/internal/domain"
 	"rockwool-facade-render-handover/internal/ledger"
@@ -172,8 +174,15 @@ func (e *Engine) Terminal(id string, req TerminalRequest) (arbiter.TerminalDecis
 		}
 
 		// Review quorum and retest completion gate the terminal decision.
+		// Reviews are persisted under reviewKey(id, reviewer), so only the
+		// reviews whose key belongs to this task count toward its quorum; a
+		// different task's approvals must never satisfy the gate.
+		prefix := reviewKey(id, "")
 		var reviews []arbiter.Review
 		_ = tx.ForEach(BucketReviews, func() any { return &arbiter.Review{} }, func(k string, v any) error {
+			if !strings.HasPrefix(k, prefix) {
+				return nil
+			}
 			reviews = append(reviews, *v.(*arbiter.Review))
 			return nil
 		})
