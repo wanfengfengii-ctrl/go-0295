@@ -213,6 +213,14 @@ func (e *Engine) Terminal(id string, req TerminalRequest) (arbiter.TerminalDecis
 				Reasons: []domain.Reason{{Code: domain.CodeTerminalConflict, Detail: "terminal lost competition"}}}
 		}
 		out = dec
+		// The terminal decision is immutable and final: permanently mark the task
+		// terminal so no further construction or rework progress is accepted. This
+		// is what makes the guards in SubmitCommand, NewGeneration and LockTask
+		// effective after a successful handover, quarantine or cancel.
+		task.Status = domain.TaskTerminal
+		if err := tx.PutJSON(BucketTasks, id, task); err != nil {
+			return err
+		}
 		return tx.AppendEvent([]byte("terminal task=" + id + " kind=" + string(dec.Kind)))
 	})
 	return out, err
