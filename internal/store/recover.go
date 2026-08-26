@@ -19,20 +19,32 @@ type RecoverVerification struct {
 // decision per task. When a contradiction is found the store is placed into
 // read-only isolation and the violation list is returned; it never guesses or
 // repairs business facts.
+//
+// A persisted record that cannot be replayed (for example a corrupted mortar
+// ledger entry that fails to deserialize) is itself a durable contradiction:
+// such a record can never be rebuilt into the running projection and cannot be
+// served by any query. Recovery therefore isolates it as a recovery violation
+// and places the store in read-only isolation rather than allowing /healthz to
+// report healthy and the service to keep accepting writes.
 func (e *Engine) Verify() (RecoverVerification, error) {
 	v := RecoverVerification{OK: true}
 	err := e.db.View(func(tx *Tx) error {
-		// 1. Mass conservation.
-		_ = tx.ForEach(BucketMortar, func() any { return &ledger.MortarState{} }, func(k string, val any) error {
+		// 1. Mass conservation. A mortar ledger entry that cannot be replayed
+		// (deserialize failure) is an unreplayable persisted record and is
+		// isolated as a recovery violation.
+		if err := tx.ForEach(BucketMortar, func() any { return &ledger.MortarState{} }, func(k string, val any) error {
 			m := val.(*ledger.MortarState)
 			if !m.CheckConservation() {
 				v.Violations = append(v.Violations, fmt.Sprintf("conservation violation mortar=%s", k))
 			}
 			return nil
-		})
-		// 2. Unique active leases.
+		}); err != nil {
+			v.Violations = append(v.Violations, fmt.Sprintf("unrecoverable mortar ledger record: %v", err))
+		}
+		// 2. Unique active leases. A lease record that cannot be replayed is an
+		// unreplayable persisted record and is isolated as a recovery violation.
 		active := map[string]string{}
-		_ = tx.ForEach(BucketLeases, func() any { return &ledger.Lease{} }, func(k string, val any) error {
+		if err := tx.ForEach(BucketLeases, func() any { return &ledger.Lease{} }, func(k string, val any) error {
 			l := val.(*ledger.Lease)
 			// A lease is only "active" conceptually during its window; a stored
 			// unexpired lease must not collide on the same resource.
@@ -45,11 +57,16 @@ func (e *Engine) Verify() (RecoverVerification, error) {
 				}
 			}
 			return nil
-		})
-		// 3. At most one terminal decision per task (enforced by key).
-		_ = tx.ForEach(BucketTerminal, func() any { return &arbiter.TerminalDecision{} }, func(k string, val any) error {
+		}); err != nil {
+			v.Violations = append(v.Violations, fmt.Sprintf("unrecoverable lease record: %v", err))
+		}
+		// 3. At most one terminal decision per task (enforced by key). A terminal
+		// record that cannot be replayed is isolated as a recovery violation.
+		if err := tx.ForEach(BucketTerminal, func() any { return &arbiter.TerminalDecision{} }, func(k string, val any) error {
 			return nil
-		})
+		}); err != nil {
+			v.Violations = append(v.Violations, fmt.Sprintf("unrecoverable terminal record: %v", err))
+		}
 		return nil
 	})
 	if err != nil {
