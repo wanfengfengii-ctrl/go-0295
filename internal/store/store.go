@@ -12,6 +12,8 @@ import (
 	"os"
 
 	bolt "go.etcd.io/bbolt"
+
+	"rockwool-facade-render-handover/internal/domain"
 )
 
 // Bucket names for each persisted entity kind.
@@ -207,4 +209,34 @@ func keyJoin(parts ...string) string {
 		buf.WriteString(p)
 	}
 	return buf.String()
+}
+
+// splitGenKey reverses genBoardKey: it splits a "<base>/gN" persistence key
+// into the stable board base key and the generation it belongs to. It reports
+// ok=false for keys that do not carry a generation suffix, so legacy
+// (non-generation-scoped) keys are simply ignored by callers that only know
+// about generation-scoped evidence.
+func splitGenKey(k string) (base string, gen domain.Generation, ok bool) {
+	idx := -1
+	for i := len(k) - 1; i >= 0; i-- {
+		if k[i] == '/' {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx+2 >= len(k) || k[idx+1] != 'g' {
+		return "", 0, false
+	}
+	var n int64
+	for i := idx + 2; i < len(k); i++ {
+		c := k[i]
+		if c < '0' || c > '9' {
+			return "", 0, false
+		}
+		n = n*10 + int64(c-'0')
+	}
+	if idx+2 == len(k) {
+		return "", 0, false
+	}
+	return k[:idx], domain.Generation(n), true
 }

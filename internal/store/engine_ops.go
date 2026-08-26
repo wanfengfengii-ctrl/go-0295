@@ -114,6 +114,10 @@ func (e *Engine) doStage(tx *Tx, task domain.FacadeTask, cmd Command) (CommandRe
 		}
 	}
 
+	// Each rework generation keeps its own isolated evidence chain. loadBoard
+	// reads the generation-scoped key, so a new generation starts from
+	// StageNone and can re-run the full process while earlier generations
+	// remain on disk as immutable history.
 	updated, err := evidence.Advance(rec, evidence.AdvanceRequest{
 		BoardID:     cmd.BoardID,
 		Generation:  cmd.Generation,
@@ -125,7 +129,7 @@ func (e *Engine) doStage(tx *Tx, task domain.FacadeTask, cmd Command) (CommandRe
 		return CommandResult{}, &domain.Failure{Code: domain.CodePrefixViolation,
 			Reasons: []domain.Reason{{Code: domain.CodePrefixViolation, Detail: err.Error()}}}
 	}
-	if err := tx.PutJSON(BucketStages, boardKey(task.ID, cmd.BoardID), updated); err != nil {
+	if err := tx.PutJSON(BucketStages, genBoardKey(task.ID, cmd.BoardID, cmd.Generation), updated); err != nil {
 		return CommandResult{}, err
 	}
 	return CommandResult{Stage: updated.Stage}, nil
@@ -174,7 +178,7 @@ func (e *Engine) addCuring(tx *Tx, task domain.FacadeTask, cmd Command, board *c
 	if iv.RateNum == 0 {
 		iv.RateNum = 1
 	}
-	intervals, err := loadCuring(tx, task.ID, cmd.BoardID)
+	intervals, err := loadCuring(tx, task.ID, cmd.BoardID, cmd.Generation)
 	if err != nil {
 		return err
 	}
@@ -193,7 +197,7 @@ func (e *Engine) addCuring(tx *Tx, task domain.FacadeTask, cmd Command, board *c
 		return &domain.Failure{Code: domain.CodeCuringGap,
 			Reasons: []domain.Reason{{Code: domain.CodeCuringGap, Detail: "curing time below minimum"}}}
 	}
-	return tx.PutJSON(BucketCuring, boardKey(task.ID, cmd.BoardID), intervals)
+	return tx.PutJSON(BucketCuring, genBoardKey(task.ID, cmd.BoardID, cmd.Generation), intervals)
 }
 
 // addAnchor installs one anchor after validating the sequence, edge margin,
@@ -205,7 +209,7 @@ func (e *Engine) addAnchor(tx *Tx, task domain.FacadeTask, cmd Command, board *c
 		W: int64(board.Cols) * cellMM(),
 		H: int64(board.Rows) * cellMM(),
 	}
-	anchors, err := loadAnchors(tx, task.ID, cmd.BoardID)
+	anchors, err := loadAnchors(tx, task.ID, cmd.BoardID, cmd.Generation)
 	if err != nil {
 		return err
 	}
@@ -223,7 +227,7 @@ func (e *Engine) addAnchor(tx *Tx, task domain.FacadeTask, cmd Command, board *c
 		return &domain.Failure{Code: code, Reasons: []domain.Reason{{Code: code, Detail: err.Error()}}}
 	}
 	anchors = append(anchors, next)
-	return tx.PutJSON(BucketAnchors, boardKey(task.ID, cmd.BoardID), anchors)
+	return tx.PutJSON(BucketAnchors, genBoardKey(task.ID, cmd.BoardID, cmd.Generation), anchors)
 }
 
 // doDrill runs the scripted depth meter through its deterministic outcomes,
@@ -248,7 +252,7 @@ func (e *Engine) doDrill(tx *Tx, task domain.FacadeTask, cmd Command) (CommandRe
 		calls = append(calls, call)
 		if outcome == evidence.OutcomeSuccess {
 			return CommandResult{Detail: fmt.Sprintf("drilled depth=%d", value)},
-				tx.PutJSON(BucketInspections, boardKey(task.ID, cmd.BoardID), calls)
+				tx.PutJSON(BucketInspections, genBoardKey(task.ID, cmd.BoardID, cmd.Generation), calls)
 		}
 		if outcome == evidence.OutcomeDisconnect {
 			// Script exhausted without success.
@@ -270,6 +274,14 @@ func leaseKey(taskID string, kind ledger.ResourceKind, number string) string {
 }
 
 func boardKey(taskID, boardID string) string { return keyJoin(taskID, boardID) }
+
+// genBoardKey is the generation-scoped persistence key for a board's evidence.
+// Each rework generation gets its own isolated stage/anchor/curing chain so a
+// new generation can re-run the full process while earlier generations remain
+// on disk as immutable history.
+func genBoardKey(taskID, boardID string, gen domain.Generation) string {
+	return keyJoin(boardKey(taskID, boardID), fmt.Sprintf("g%d", gen))
+}
 
 func cellMM() int64 { return 1000 }
 
@@ -320,7 +332,7 @@ func loadMortar(tx *Tx, taskID string) (*ledger.MortarState, error) {
 
 func loadBoard(tx *Tx, taskID, boardID string, gen domain.Generation) (evidence.BoardRecord, error) {
 	rec := evidence.BoardRecord{BoardID: boardID, Generation: gen, Stage: evidence.StageNone}
-	ok, err := tx.GetJSON(BucketStages, boardKey(taskID, boardID), &rec)
+	ok, err := tx.GetJSON(BucketStages, genBoardKey(taskID, boardID, gen), &rec)
 	if err != nil {
 		return rec, err
 	}
@@ -330,9 +342,9 @@ func loadBoard(tx *Tx, taskID, boardID string, gen domain.Generation) (evidence.
 	return rec, nil
 }
 
-func loadCuring(tx *Tx, taskID, boardID string) ([]evidence.CuringInterval, error) {
+func loadCuring(tx *Tx, taskID, boardID string, gen domain.Generation) ([]evidence.CuringInterval, error) {
 	var out []evidence.CuringInterval
-	ok, err := tx.GetJSON(BucketCuring, boardKey(taskID, boardID), &out)
+	ok, err := tx.GetJSON(BucketCuring, genBoardKey(taskID, boardID, gen), &out)
 	if err != nil {
 		return nil, err
 	}
@@ -342,9 +354,9 @@ func loadCuring(tx *Tx, taskID, boardID string) ([]evidence.CuringInterval, erro
 	return out, nil
 }
 
-func loadAnchors(tx *Tx, taskID, boardID string) ([]evidence.Anchor, error) {
+func loadAnchors(tx *Tx, taskID, boardID string, gen domain.Generation) ([]evidence.Anchor, error) {
 	var out []evidence.Anchor
-	ok, err := tx.GetJSON(BucketAnchors, boardKey(taskID, boardID), &out)
+	ok, err := tx.GetJSON(BucketAnchors, genBoardKey(taskID, boardID, gen), &out)
 	if err != nil {
 		return nil, err
 	}

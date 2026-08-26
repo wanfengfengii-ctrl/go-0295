@@ -77,20 +77,50 @@ type EvidenceView struct {
 	Curing  map[string][]evidence.CuringInterval `json:"curing"`
 }
 
-// GetEvidence returns the board stages, anchors and curing intervals.
+// GetEvidence returns the board stages, anchors and curing intervals. Each
+// rework generation persists its own isolated evidence chain under a
+// generation-scoped key; here they are projected back onto the stable board
+// key, with the highest surviving generation's record winning so the current
+// effective state is visible while earlier generations stay on disk as
+// immutable history.
 func (e *Engine) GetEvidence(id string) (EvidenceView, error) {
 	out := EvidenceView{Boards: map[string]evidence.BoardRecord{}, Anchors: map[string][]evidence.Anchor{}, Curing: map[string][]evidence.CuringInterval{}}
 	err := e.db.View(func(tx *Tx) error {
+		anchorGen := map[string]domain.Generation{}
+		curingGen := map[string]domain.Generation{}
 		_ = tx.ForEach(BucketStages, func() any { return &evidence.BoardRecord{} }, func(k string, v any) error {
-			out.Boards[k] = *v.(*evidence.BoardRecord)
+			base, _, ok := splitGenKey(k)
+			if !ok {
+				return nil
+			}
+			rec := *v.(*evidence.BoardRecord)
+			if cur, exists := out.Boards[base]; !exists || rec.Generation > cur.Generation {
+				out.Boards[base] = rec
+			}
 			return nil
 		})
 		_ = tx.ForEach(BucketAnchors, func() any { return &[]evidence.Anchor{} }, func(k string, v any) error {
-			out.Anchors[k] = *v.(*[]evidence.Anchor)
+			base, gen, ok := splitGenKey(k)
+			if !ok {
+				return nil
+			}
+			anchors := *v.(*[]evidence.Anchor)
+			if prev, exists := anchorGen[base]; !exists || gen > prev {
+				anchorGen[base] = gen
+				out.Anchors[base] = anchors
+			}
 			return nil
 		})
 		_ = tx.ForEach(BucketCuring, func() any { return &[]evidence.CuringInterval{} }, func(k string, v any) error {
-			out.Curing[k] = *v.(*[]evidence.CuringInterval)
+			base, gen, ok := splitGenKey(k)
+			if !ok {
+				return nil
+			}
+			intervals := *v.(*[]evidence.CuringInterval)
+			if prev, exists := curingGen[base]; !exists || gen > prev {
+				curingGen[base] = gen
+				out.Curing[base] = intervals
+			}
 			return nil
 		})
 		return nil
