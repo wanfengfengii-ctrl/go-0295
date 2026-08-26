@@ -271,6 +271,13 @@ func leaseKey(taskID string, kind ledger.ResourceKind, number string) string {
 
 func boardKey(taskID, boardID string) string { return keyJoin(taskID, boardID) }
 
+// idempotencyKey scopes an operation id to its task. Boards, leases and reviews
+// are already keyed per task; idempotency was the lone global key, so the same
+// operation id reused across two tasks short-circuited the second task's command
+// (same normalized bytes) and returned the first task's cached response without
+// ever running dispatch, leaving the second task's board in its prior stage.
+func idempotencyKey(taskID, operationID string) string { return keyJoin(taskID, operationID) }
+
 func cellMM() int64 { return 1000 }
 
 func cellAreaMM2() int64 { return cellMM() * cellMM() }

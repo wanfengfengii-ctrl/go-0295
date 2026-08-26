@@ -213,7 +213,7 @@ func (e *Engine) SubmitCommand(id string, cmd Command) (CommandResult, error) {
 	err = e.db.Update(func(tx *Tx) error {
 		// Idempotency check.
 		var rec domain.IdempotencyRecord
-		if ok, _ := tx.GetJSON(BucketIdempotency, cmd.OperationID, &rec); ok {
+		if ok, _ := tx.GetJSON(BucketIdempotency, idempotencyKey(id, cmd.OperationID), &rec); ok {
 			if rec.RequestHash != normHash {
 				return &domain.Failure{Code: domain.CodeIdempotencyConflict,
 					Reasons: []domain.Reason{{Code: domain.CodeIdempotencyConflict, Detail: "different content for operation id"}}}
@@ -251,7 +251,7 @@ func (e *Engine) SubmitCommand(id string, cmd Command) (CommandResult, error) {
 			ResponseHash: string(raw),
 			LogicalTime:  cmd.LogicalTime,
 		}
-		return tx.PutJSON(BucketIdempotency, cmd.OperationID, rec)
+		return tx.PutJSON(BucketIdempotency, idempotencyKey(id, cmd.OperationID), rec)
 	})
 	return out, err
 }
